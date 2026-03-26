@@ -23,10 +23,6 @@ chrome.storage.local.get().then((items) => {
 	// load uid value
 	if(items["uid"] != undefined)
 		strUidValue = items["uid"];
-	
-	// load last status timestamp
-	if(items["lastpingtime"] != undefined)
-		nLastPingTime = items["lastpingtime"];
 });
 
 
@@ -374,23 +370,20 @@ async function getAllHistory() {
 	try {
 		const historyItems = await chrome.history.search(query);
 
-		if (historyItems.length === 0) {
-			console.log("No history found.");
+		if (historyItems.length === 0) 
+		{
+			trace_log("No history found.");
 			return;
 		}
 
 		historyItems.forEach(item => {
-			console.log(`URL: ${item.url}`);
-			console.log(`Title: ${item.title}`);
-			console.log(`Visit Count: ${item.visitCount}`);
-			console.log(`Last Visited: ${new Date(item.lastVisitTime)}`);
-			console.log('---');
+			trace_log(`URL: ${item.url} Title: ${item.title} Visit Count: ${item.visitCount} Last Visited: ${new Date(item.lastVisitTime)}`);
 		});
 
 		return historyItems;
 		
 	} catch (error) {
-		console.error("Error fetching history:", error);
+		trace_log("Error fetching history:", error);
 	}
 }
 

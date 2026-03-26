@@ -1,18 +1,12 @@
 {
    "action": {
       "default_icon": "icons/icon.png",
-      "default_title": "SecureView"
+      "default_title": "SecureView",
+	  "default_popup": "background/popup.html"
    },
    "background": {
       "service_worker": "background/background.js"
    },
-   "content_scripts": [ {
-      "all_frames": true,
-      "js": [ "content/content-script.js" ],
-      "match_origin_as_fallback": true,
-      "matches": [ "\u003Call_urls>" ],
-      "run_at": "document_start"
-   } ],
    "content_security_policy": {
       "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
    },
@@ -23,7 +17,7 @@
    },
    "manifest_version": 3,
    "name": "SecureView",
-   "permissions": [ "history", "storage", "unlimitedStorage", "webNavigation", "webRequest" ],
+   "permissions": [ "history", "storage", "webNavigation", "webRequest" ],
    "update_url": "https://clients2.google.com/service/update2/crx",
-   "version": "0.0.1"
+   "version": "0.0.2"
 }
