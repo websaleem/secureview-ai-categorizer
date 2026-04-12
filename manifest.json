@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "SecureView",
-  "version": "1.0.0",
-  "description": "Track active time and auto-categorize sites into 11 categories using AI and review your daily history in one unified dashboard.",
+  "name": "SecureView Beta",
+  "version": "1.0.1",
+  "description": "Track active browsing time, get AI-powered site categorization, and visualize your daily web activities - all in one dashboard.",
   "permissions": [
     "tabs",
     "storage",
