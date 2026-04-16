@@ -153,8 +153,10 @@ Both flags are watched via `chrome.storage.onChanged`, so changes take effect im
 | Constant | Value | Purpose |
 |---|---|---|
 | Idle threshold | 60s | Chrome idle API + content script silence |
-| Activity debounce | 10s | Content script reporting interval |
-| Flush cycle | 60s | Background alarm tick |
+| Activity debounce | 10s | Content script `USER_ACTIVE` reporting interval |
+| Flush cycle | 60s | Background alarm tick — accumulates dwell time |
+| Categorization | Immediate | Triggered by `PAGE_READY` from content script on document load and `<title>` mutation; does not wait for the alarm |
+| CloudFront timeout | 10s | Per attempt; up to 2 retries with exponential backoff |
 
 ## Important Design Constraints
 
