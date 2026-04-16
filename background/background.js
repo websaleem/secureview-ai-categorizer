@@ -382,5 +382,12 @@ async function init() {
   Logger.info(LOG, "Extension initialized");
 }
 
-chrome.runtime.onInstalled.addListener(init);
+chrome.runtime.setUninstallURL("https://www.websaleem.com/secureview/uninstall.html");
+
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason === "install") {
+    chrome.tabs.create({ url: "https://www.websaleem.com/secureview/success.html" });
+  }
+  init();
+});
 chrome.runtime.onStartup.addListener(init);

@@ -2,7 +2,7 @@
 
 ## Overview
 
-SecureView is a Chrome Extension (Manifest V3) that gives you a clear picture of how you spend your time online. It tracks active browsing time per site, automatically categorizes every domain into one of 11 categories (Technology, Entertainment, Productivity, etc.), and surfaces the data through a clean popup UI with daily history and search. For sites it cannot classify by rule, it falls back to Amazon Bedrock via a serverless AWS pipeline — keeping your API key out of the extension entirely. Categorization happens immediately when a page loads (driven by the content script), not on the next 60-second alarm tick. The popup updates live as soon as a category is written to storage. Built with pure vanilla JavaScript; no build step, no dependencies.
+SecureView is a Chrome Extension (Manifest V3) that gives you a clear picture of how you spend your time online. It tracks active browsing time per site, automatically categorizes every domain into one of many categories (Technology, Entertainment, Productivity, and more), and surfaces the data through a clean popup UI with daily history and search. For sites it cannot classify by rule, it falls back to Amazon Bedrock via a serverless AWS pipeline — keeping your API key out of the extension entirely. Categorization happens immediately when a page loads, driven by the content script. The popup updates live as soon as a category is written to storage. Built with pure vanilla JavaScript; no build step, no dependencies.
 
 ## Installation
 
@@ -91,13 +91,13 @@ Install SecureView from the [Chrome Web Store](https://chromewebstore.google.com
 
 The AI pipeline is only invoked for domains that fall through rule-based matching as "Other" (or for all domains when `force_cloudfront` is enabled). Results are cached in `chrome.storage.local` under `br_cat_cache` so each domain is classified at most once. The real AWS API key never leaves Lambda@Edge — the extension holds only a lightweight shared secret (`x-origin-token`).
 
-Categorization is triggered **immediately** when the content script sends `PAGE_READY` (on `document` load complete, and again whenever `<title>` changes for SPAs). The result is written to the domain entry in `chrome.storage.local` right away, and the open popup re-renders via `storage.onChanged` — no waiting for the 60-second alarm tick.
+Categorization is triggered **immediately** when the content script sends `PAGE_READY` (on `document` load complete, and again whenever `<title>` changes for SPAs). The result is written to the domain entry in `chrome.storage.local` right away, and the open popup re-renders via `storage.onChanged`.
 
 ### Extension Components
 
 The extension has four runtime components that communicate via Chrome APIs:
 
-**`background/background.js` (Service Worker)** — The core tracking engine. Maintains session state in `chrome.storage.session` (key: `sv_session`) so it survives service worker restarts. Tracks active tab, window focus, and idle state. On every tab switch or `PAGE_READY` message it calls `triggerEagerCategorization()`, which immediately classifies the URL+title and writes the result to the domain entry — no waiting for the alarm. Flushes accumulated dwell time to `chrome.storage.local` every 60 seconds via an alarm, and also on every tab switch.
+**`background/background.js` (Service Worker)** — The core tracking engine. Maintains session state in `chrome.storage.session` (key: `sv_session`) so it survives service worker restarts. Tracks active tab, window focus, and idle state. On every tab switch or `PAGE_READY` message it calls `triggerEagerCategorization()`, which immediately classifies the URL+title and writes the result to the domain entry — no waiting for the alarm. Flushes accumulated dwell time to `chrome.storage.local` every 60 seconds via an alarm, and also on every tab switch. On first install (`onInstalled` reason `"install"`) opens `https://www.websaleem.com/secureview/success.html` in a new tab. `setUninstallURL` points to `https://www.websaleem.com/secureview/uninstall.html` so Chrome opens it automatically when the extension is removed.
 
 **`content/content_script.js`** — Injected into all pages. Sends `PAGE_READY` (`{ title, url }`) to the background as soon as `document` load fires; re-sends whenever the `<title>` element changes (MutationObserver) to catch SPA navigation; re-sends on `visibilitychange` when the tab becomes visible again. Also detects user activity (mouse, keyboard, scroll) and sends `USER_ACTIVE` every 10 seconds while active.
 
@@ -105,7 +105,7 @@ The extension has four runtime components that communicate via Chrome APIs:
 
 **`shared/logger.js`** — Loaded in all four contexts (background SW, content script, popup, categorizer). Provides `Logger.debug/info/warn/error(module, message, ...args)`. Every log line is prefixed with a timestamp (`YYYY-MM-DD HH:MM:SS.mmm`), level, and module name. Errors always print; all other levels are gated by the `debug_config` flag (see Runtime Settings Flags below).
 
-**`shared/categories.js`** — Shared module imported by both `background.js` (via `importScripts`) and `popup.html` (via `<script>`). Defines 11 categories with domain lists, keyword patterns, icons, and colors. Matching order: exact domain → root domain → keyword scan.
+**`shared/categories.js`** — Shared module imported by both `background.js` (via `importScripts`) and `popup.html` (via `<script>`). Defines categories with domain lists, keyword patterns, icons, and colors. Matching order: exact domain → root domain → keyword scan.
 
 **`shared/categorizer.js`** — Imported by `background.js` via `importScripts`. Provides `categorizeUrlEnhanced(url, title)`, an async drop-in for `categorizeUrl()`. Rule-based first; for "Other" domains it calls a CloudFront distribution. Flow: `CloudFront → Lambda@Edge (viewer-request validates x-origin-token, injects real x-api-key) → API Gateway → Lambda → Bedrock`. The real API key never leaves Lambda@Edge — the extension only holds a lightweight shared secret (`x-origin-token`). Beta and prod CloudFront URLs + origin tokens are hardcoded in `CF_CONFIGS`; active env is derived from the extension name at runtime. Retries up to 2× with exponential backoff to handle Lambda@Edge cold starts. Results cached under `br_cat_cache`. Fails silently if unreachable.
 
@@ -155,7 +155,7 @@ Both flags are watched via `chrome.storage.onChanged`, so changes take effect im
 | Idle threshold | 60s | Chrome idle API + content script silence |
 | Activity debounce | 10s | Content script `USER_ACTIVE` reporting interval |
 | Flush cycle | 60s | Background alarm tick — accumulates dwell time |
-| Categorization | Immediate | Triggered by `PAGE_READY` from content script on document load and `<title>` mutation; does not wait for the alarm |
+| Categorization | Immediate | Triggered by `PAGE_READY` from content script on document load and `<title>` mutation |
 | CloudFront timeout | 10s | Per attempt; up to 2 retries with exponential backoff |
 
 ## Important Design Constraints
