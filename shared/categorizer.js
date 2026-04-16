@@ -44,11 +44,11 @@ const ACTIVE_ENV = chrome.runtime.getManifest().name.toLowerCase().includes("bet
 const CF_CONFIGS = {
   beta: {
     url:         "https://d3dxj0v65ds4s6.cloudfront.net/categorize",
-    originToken: ""   // set your beta origin token here
+    originToken: "eyJhbGciOiJIUzI1NiIsInR5cCI6IlRPS0VOIn0.eyJ1c2VySWQiOiJ3ZWJzYWxlZW0iLCJyb2xlIjoiYWRtaW4iLCJlbnYiOiJiZXRhIn0.cAZVTWK7srj86IAF-x73OwYCNcUheTlUhxZgLofeZHw"
   },
   prod: {
     url:         "https://d3dxj0v65ds4s6.cloudfront.net/categorize",
-    originToken: ""   // set your prod origin token here
+    originToken: "eyJhbGciOiJIUzI1NiIsInR5cCI6IlRPS0VOIn0.eyJ1c2VySWQiOiJ3ZWJzYWxlZW0iLCJyb2xlIjoiYWRtaW4iLCJlbnYiOiJwcm9kIn0.qZHILrXoa4g2llBM5tFDrf2t03Ir2WrNbrhvaxW2ToE"
   }
 };
 
@@ -120,14 +120,13 @@ async function classifyWithCloudFront(url, hostname, title) {
     const data     = await response.json();
     const category = (data.category || "").trim();
 
-    const validNames = CATEGORY_RULES.map(c => c.name);
-    if (validNames.includes(category)) {
+    if (category) {
       Logger.info(LOG_CAT, `Classified: ${hostname} → ${category}`);
       await setCachedCategory(hostname, category);
       return category;
     }
 
-    Logger.warn(LOG_CAT, `Unrecognised category "${category}" returned for: ${hostname}`);
+    Logger.warn(LOG_CAT, `Empty category returned for: ${hostname}`);
   } catch (e) {
     Logger.warn(LOG_CAT, `CloudFront call failed for: ${hostname}`, e?.message);
   }
@@ -136,6 +135,45 @@ async function classifyWithCloudFront(url, hostname, title) {
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
+
+// Maps a Bedrock category name to an icon and color using keyword matching.
+// Checks exact CATEGORY_RULES matches first, then falls back to keyword hints.
+function getIconForCategory(categoryName) {
+  const rule = CATEGORY_RULES.find(c => c.name === categoryName);
+  if (rule) return { icon: rule.icon, color: rule.color };
+
+  const lower = categoryName.toLowerCase();
+  const ICON_MAP = [
+    { keywords: ["finance", "bank", "invest", "crypto", "stock", "money", "insurance", "loan", "mortgage", "accounting"], icon: "💰", color: "#27AE60" },
+    { keywords: ["news", "media", "press", "journal", "magazine", "blog", "report"],                                       icon: "📰", color: "#E74C3C" },
+    { keywords: ["entertain", "movie", "film", "music", "stream", "video", "tv", "show", "sport", "theatre"],             icon: "🎬", color: "#9B59B6" },
+    { keywords: ["social", "community", "forum", "chat", "message", "dating"],                                            icon: "💬", color: "#3498DB" },
+    { keywords: ["travel", "hotel", "flight", "vacation", "trip", "tour", "airline", "airport", "cruise"],                icon: "✈️", color: "#1ABC9C" },
+    { keywords: ["shop", "store", "retail", "ecommerce", "marketplace", "fashion", "clothing", "apparel"],                icon: "🛒", color: "#E67E22" },
+    { keywords: ["tech", "software", "hardware", "developer", "code", "programming", "cloud", "ai", "saas", "cyber"],     icon: "💻", color: "#2ECC71" },
+    { keywords: ["education", "learn", "school", "university", "course", "training", "academic", "research", "science"],  icon: "📚", color: "#F39C12" },
+    { keywords: ["health", "fitness", "medical", "doctor", "hospital", "clinic", "pharma", "wellness", "diet"],           icon: "🏃", color: "#16A085" },
+    { keywords: ["productiv", "tool", "workspace", "office", "collaborat", "project", "task", "email", "calendar"],       icon: "⚡", color: "#8E44AD" },
+    { keywords: ["game", "gaming", "esport", "casino", "gambling"],                                                       icon: "🎮", color: "#C0392B" },
+    { keywords: ["food", "restaurant", "recipe", "cook", "drink", "beverage", "delivery"],                                icon: "🍕", color: "#E74C3C" },
+    { keywords: ["real estate", "property", "realt", "housing", "mortgage"],                                              icon: "🏠", color: "#795548" },
+    { keywords: ["government", "public service", "politic", "legal", "law", "court"],                                     icon: "🏛️", color: "#607D8B" },
+    { keywords: ["sport", "football", "soccer", "basketball", "tennis", "cricket", "gym", "athlet"],                      icon: "🏆", color: "#FF9800" },
+    { keywords: ["art", "design", "creative", "photo", "graphic", "illustration", "museum"],                              icon: "🎨", color: "#AB47BC" },
+    { keywords: ["automotive", "car", "vehicle", "truck", "motorcycle", "transport"],                                     icon: "🚗", color: "#546E7A" },
+    { keywords: ["nature", "environment", "climate", "animal", "wildlife", "outdoor"],                                    icon: "🌿", color: "#43A047" },
+    { keywords: ["religion", "spiritual", "church", "faith", "prayer"],                                                   icon: "🙏", color: "#8D6E63" },
+    { keywords: ["adult", "18+", "explicit"],                                                                              icon: "🔞", color: "#B71C1C" },
+  ];
+
+  for (const entry of ICON_MAP) {
+    if (entry.keywords.some(k => lower.includes(k))) {
+      return { icon: entry.icon, color: entry.color };
+    }
+  }
+
+  return { icon: "🌐", color: "#7F8C8D" };
+}
 
 // Drop-in async replacement for categorizeUrl().
 // Rule-based first; CloudFront only for unrecognized ("Other") domains.
@@ -160,8 +198,6 @@ async function categorizeUrlEnhanced(url, title) {
   const apiCategory = await classifyWithCloudFront(url, hostname, title);
   if (!apiCategory) return ruleResult;
 
-  const rule = CATEGORY_RULES.find(c => c.name === apiCategory);
-  return rule
-    ? { name: rule.name, icon: rule.icon, color: rule.color }
-    : ruleResult;
+  const { icon, color } = getIconForCategory(apiCategory);
+  return { name: apiCategory, icon, color };
 }

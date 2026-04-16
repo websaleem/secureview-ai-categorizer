@@ -430,6 +430,23 @@ async function init() {
   document.getElementById("exclusion-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") document.getElementById("exclusion-add-btn").click();
   });
+
+  // Live-refresh: re-render the moment the background writes a category or title update.
+  const todayKey = getTodayKey();
+  chrome.storage.onChanged.addListener(async (changes, area) => {
+    if (area !== "local" || !(todayKey in changes)) return;
+    const newData = changes[todayKey].newValue;
+    if (!newData) return;
+    Logger.debug(LOG, "Storage updated — refreshing display");
+    // Merge in-place so in-flight search/filter state is preserved
+    Object.assign(data.domains,     newData.domains     || {});
+    Object.assign(data.categories,  newData.categories  || {});
+    data.totalSeconds = newData.totalSeconds ?? data.totalSeconds;
+    renderSummary(data);
+    renderCategories(data);
+    renderSites(data, document.getElementById("search-input").value.trim());
+    await renderCurrentPage(data);
+  });
 }
 
 document.addEventListener("DOMContentLoaded", init);

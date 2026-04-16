@@ -2,7 +2,11 @@
 
 ## Overview
 
-SecureView is a Chrome Extension (Manifest V3) that gives you a clear picture of how you spend your time online. It tracks active browsing time per site, automatically categorizes every domain into one of 11 categories (Technology, Entertainment, Productivity, etc.), and surfaces the data through a clean popup UI with daily history and search. For sites it cannot classify by rule, it falls back to Amazon Bedrock via a serverless AWS pipeline — keeping your API key out of the extension entirely. Built with pure vanilla JavaScript; no build step, no dependencies.
+SecureView is a Chrome Extension (Manifest V3) that gives you a clear picture of how you spend your time online. It tracks active browsing time per site, automatically categorizes every domain into one of 11 categories (Technology, Entertainment, Productivity, etc.), and surfaces the data through a clean popup UI with daily history and search. For sites it cannot classify by rule, it falls back to Amazon Bedrock via a serverless AWS pipeline — keeping your API key out of the extension entirely. Categorization happens immediately when a page loads (driven by the content script), not on the next 60-second alarm tick. The popup updates live as soon as a category is written to storage. Built with pure vanilla JavaScript; no build step, no dependencies.
+
+## Installation
+
+Install SecureView from the [Chrome Web Store](https://chromewebstore.google.com/detail/secureview/ojhmodiiehcingcnhlglenenoemmegim).
 
 ## Loading the Extension for Testing
 
@@ -13,19 +17,93 @@ SecureView is a Chrome Extension (Manifest V3) that gives you a clear picture of
 
 ## Architecture
 
+### End-to-End Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Chrome Extension                          │
+│                                                                  │
+│  ┌─────────────────┐  PAGE_READY      ┌──────────────────────┐  │
+│  │ content_        │  (title+url)     │ background.js        │  │
+│  │ script.js       │ ───────────────▶ │ (Service Worker)     │  │
+│  │                 │  USER_ACTIVE     │                      │  │
+│  │ • Sends title   │ ───────────────▶ │ • Tracks active tab  │  │
+│  │   on doc ready  │                  │ • Measures dwell time│  │
+│  │ • Watches <title│                  │ • Eager categorize   │  │
+│  │   > for SPA     │                  │   on PAGE_READY      │  │
+│  │   changes       │                  │ • Flushes every 60s  │  │
+│  └─────────────────┘                  └──────────┬───────────┘  │
+│                                                  │              │
+│  ┌──────────────────────────────────────┐        │ categorize   │
+│  │ popup.html / popup.js / popup.css    │        ▼              │
+│  │                                      │  ┌─────────────────┐  │
+│  │ • Category + site views              │  │ categorizer.js  │  │
+│  │ • Daily history & search             │  │                 │  │
+│  │ • Live-updates via                   │  │ 1. Rule-based   │  │
+│  │   storage.onChanged                  │  │    (categories  │  │
+│  └──────────────────────────────────────┘  │    .js)         │  │
+│           ▲  storage update                │ 2. AI fallback  │  │
+│           └────────────────────────────────│    for "Other"  │  │
+│                                            └────────┬────────┘  │
+│  ┌──────────────────────────────────────┐           │           │
+│  │ shared/logger.js                     │           │           │
+│  │ shared/categories.js                 │           │           │
+│  └──────────────────────────────────────┘           │           │
+└────────────────────────────────────────────────────┼────────────┘
+                                                      │ HTTPS
+                                                      │ x-origin-token
+                                                      ▼
+                                             ┌─────────────────┐
+                                             │   CloudFront    │
+                                             │  Distribution   │
+                                             └────────┬────────┘
+                                                      │
+                                                      ▼
+                                             ┌─────────────────┐
+                                             │  Lambda@Edge    │
+                                             │ viewer-request  │
+                                             │                 │
+                                             │ • Validates     │
+                                             │   x-origin-token│
+                                             │ • Injects real  │
+                                             │   x-api-key     │
+                                             └────────┬────────┘
+                                                      │
+                                                      ▼
+                                             ┌─────────────────┐
+                                             │   API Gateway   │
+                                             │  (API key auth) │
+                                             └────────┬────────┘
+                                                      │
+                                                      ▼
+                                             ┌─────────────────┐
+                                             │     Lambda      │
+                                             │  (classifier)   │
+                                             └────────┬────────┘
+                                                      │
+                                                      ▼
+                                             ┌─────────────────┐
+                                             │  Amazon Bedrock │
+                                             │ (AI category    │
+                                             │  inference)     │
+                                             └─────────────────┘
+```
+
+The AI pipeline is only invoked for domains that fall through rule-based matching as "Other" (or for all domains when `force_cloudfront` is enabled). Results are cached in `chrome.storage.local` under `br_cat_cache` so each domain is classified at most once. The real AWS API key never leaves Lambda@Edge — the extension holds only a lightweight shared secret (`x-origin-token`).
+
+Categorization is triggered **immediately** when the content script sends `PAGE_READY` (on `document` load complete, and again whenever `<title>` changes for SPAs). The result is written to the domain entry in `chrome.storage.local` right away, and the open popup re-renders via `storage.onChanged` — no waiting for the 60-second alarm tick.
+
+### Extension Components
+
 The extension has four runtime components that communicate via Chrome APIs:
 
-**`background/background.js` (Service Worker)** — The core tracking engine. Maintains session state in `chrome.storage.session` (key: `sv_session`) so it survives service worker restarts. Tracks active tab, window focus, and idle state. Flushes accumulated time to `chrome.storage.local` every 60 seconds via an alarm, and also on every tab switch.
+**`background/background.js` (Service Worker)** — The core tracking engine. Maintains session state in `chrome.storage.session` (key: `sv_session`) so it survives service worker restarts. Tracks active tab, window focus, and idle state. On every tab switch or `PAGE_READY` message it calls `triggerEagerCategorization()`, which immediately classifies the URL+title and writes the result to the domain entry — no waiting for the alarm. Flushes accumulated dwell time to `chrome.storage.local` every 60 seconds via an alarm, and also on every tab switch.
 
-**`content/content_script.js`** — Injected into all pages. Detects user activity (mouse, keyboard, scroll) and sends `USER_ACTIVE` messages to the background SW every 10 seconds while active. Also uses Page Visibility API to resume tracking when a tab regains focus.
+**`content/content_script.js`** — Injected into all pages. Sends `PAGE_READY` (`{ title, url }`) to the background as soon as `document` load fires; re-sends whenever the `<title>` element changes (MutationObserver) to catch SPA navigation; re-sends on `visibilitychange` when the tab becomes visible again. Also detects user activity (mouse, keyboard, scroll) and sends `USER_ACTIVE` every 10 seconds while active.
 
-**`popup/popup.html` + `popup.js` + `popup.css`** — The extension popup UI. Reads today's data directly from `chrome.storage.local`, renders category/site views, supports search, and shows a history overlay for past days. Never writes to storage.
+**`popup/popup.html` + `popup.js` + `popup.css`** — The extension popup UI. Reads today's data from `chrome.storage.local` on open, renders category/site views, supports search, and shows a history overlay for past days. Subscribes to `chrome.storage.onChanged` for today's data key so the "Now:", category, and site views update live the moment the background writes a categorization result — without reopening the popup.
 
-**`shared/logger.js`** — Loaded in all four contexts (background SW, content script, popup, categorizer). Provides `Logger.debug/info/warn/error(module, message, ...args)`. Every log line is prefixed with a timestamp (`YYYY-MM-DD HH:MM:SS.mmm`), level, and module name. Errors always print; all other levels are gated by the `enabled` flag. Toggle without reloading the extension:
-```js
-chrome.storage.local.set({ debug_config: { enabled: true } })  // enable
-chrome.storage.local.set({ debug_config: { enabled: false } }) // disable
-```
+**`shared/logger.js`** — Loaded in all four contexts (background SW, content script, popup, categorizer). Provides `Logger.debug/info/warn/error(module, message, ...args)`. Every log line is prefixed with a timestamp (`YYYY-MM-DD HH:MM:SS.mmm`), level, and module name. Errors always print; all other levels are gated by the `debug_config` flag (see Runtime Settings Flags below).
 
 **`shared/categories.js`** — Shared module imported by both `background.js` (via `importScripts`) and `popup.html` (via `<script>`). Defines 11 categories with domain lists, keyword patterns, icons, and colors. Matching order: exact domain → root domain → keyword scan.
 
@@ -33,12 +111,32 @@ chrome.storage.local.set({ debug_config: { enabled: false } }) // disable
 
 AWS setup required (per env): CloudFront distribution pointing to API Gateway as origin; Lambda@Edge viewer-request function that validates `x-origin-token` and injects `x-api-key`; API Gateway with API key authorization; Lambda function that calls Amazon Bedrock for classification.
 
+### Runtime Settings Flags
+
+Both flags are toggled live via `chrome.storage.local` — no extension reload required. Open DevTools on any extension page (background SW, popup) and run:
+
+| Flag | Storage key | Effect |
+|---|---|---|
+| Debug logging | `debug_config` | Enables/disables all `Logger.debug/info/warn` output across every context. Errors always print. On by default in beta builds; off in prod. |
+| Force AI classification | `force_cloudfront` | Bypasses rule-based matching for all sites and sends every URL straight to the AWS pipeline. Useful for testing Bedrock responses against known domains. Browser-internal pages (`chrome://`, `about:`) are always classified locally regardless of this flag. |
+
+```js
+// Debug logging
+chrome.storage.local.set({ debug_config: { enabled: true } })   // enable
+chrome.storage.local.set({ debug_config: { enabled: false } })  // disable
+
+// Force AI classification (skip rule-based matching)
+chrome.storage.local.set({ force_cloudfront: true })   // enable
+chrome.storage.local.set({ force_cloudfront: false })  // disable
+```
+
+Both flags are watched via `chrome.storage.onChanged`, so changes take effect immediately in all active contexts.
 
 ## Storage Schema
 
 **Session state** (`chrome.storage.session`, key: `sv_session`):
 ```json
-{ "currentUrl": "...", "activeTabId": 123, "sessionStart": 1712520000000, "isWindowFocused": true, "isUserIdle": false }
+{ "currentUrl": "...", "activeTabId": 123, "currentTabTitle": "Page Title", "sessionStart": 1712520000000, "isWindowFocused": true, "isUserIdle": false }
 ```
 
 **Daily data** (`chrome.storage.local`, key: `data_YYYY_MM_DD`):

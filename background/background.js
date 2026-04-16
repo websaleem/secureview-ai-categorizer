@@ -13,6 +13,7 @@ Logger.init();
 // ─── In-memory state (re-hydrated from storage.session on every SW wake) ──────
 let currentUrl = null;
 let activeTabId = null;
+let currentTabTitle = null;
 let sessionStart = null;
 let isWindowFocused = true;
 let isUserIdle = false;
@@ -51,6 +52,7 @@ async function loadState() {
       if (s) {
         currentUrl = s.currentUrl ?? null;
         activeTabId = s.activeTabId ?? null;
+        currentTabTitle = s.currentTabTitle ?? null;
         sessionStart = s.sessionStart ?? null;
         isWindowFocused = s.isWindowFocused ?? true;
         isUserIdle = s.isUserIdle ?? false;
@@ -64,7 +66,7 @@ async function loadState() {
 
 function persistState() {
   chrome.storage.session.set({
-    [SESSION_KEY]: { currentUrl, activeTabId, sessionStart, isWindowFocused, isUserIdle }
+    [SESSION_KEY]: { currentUrl, activeTabId, currentTabTitle, sessionStart, isWindowFocused, isUserIdle }
   });
 }
 
@@ -116,14 +118,16 @@ async function flushTime(url) {
   if (!hostname) return;
 
   const data = await getStorageData();
-  const existingTitle = data.domains[hostname]?.title || "";
+  const existingTitle = data.domains[hostname]?.title || currentTabTitle || "";
   const category = await categorizeUrlEnhanced(url, existingTitle);
 
   Logger.info(LOG, `Flush: ${hostname} → ${elapsed}s (${category.name})`);
 
   if (!data.domains[hostname]) {
+    const initialTitle = currentTabTitle || "";
+    Logger.debug(LOG, `New domain entry: ${hostname}, title: "${initialTitle}"`);
     data.domains[hostname] = {
-      url, hostname, title: "", seconds: 0,
+      url, hostname, title: initialTitle, seconds: 0,
       category: category.name, categoryIcon: category.icon,
       categoryColor: category.color, lastVisit: now
     };
@@ -155,8 +159,37 @@ async function endSession() {
   }
   currentUrl = null;
   activeTabId = null;
+  currentTabTitle = null;
   sessionStart = null;
   persistState();
+}
+
+// Categorize url+title immediately and persist the result to the domain entry.
+// Called on tab switch AND on title updates so CloudFront always gets the real title.
+// Hits the category cache if the domain was already classified; makes a fresh call otherwise.
+function triggerEagerCategorization(url, title) {
+  (async () => {
+    try {
+      const hostname = new URL(url).hostname.replace(/^www\./, "");
+      const category = await categorizeUrlEnhanced(url, title || "");
+      const data = await getStorageData();
+      if (!data.domains[hostname]) {
+        Logger.info(LOG, `Eager category set (new): ${hostname} → ${category.name}`);
+        data.domains[hostname] = {
+          url, hostname, title: title || currentTabTitle || "", seconds: 0,
+          category: category.name, categoryIcon: category.icon,
+          categoryColor: category.color, lastVisit: Date.now()
+        };
+        await saveStorageData(data);
+      } else if (!data.domains[hostname].category || data.domains[hostname].category === "Other") {
+        Logger.info(LOG, `Eager category upgraded: ${hostname} → ${category.name}`);
+        data.domains[hostname].category      = category.name;
+        data.domains[hostname].categoryIcon  = category.icon;
+        data.domains[hostname].categoryColor = category.color;
+        await saveStorageData(data);
+      }
+    } catch (e) {}
+  })();
 }
 
 async function switchTo(url, tabId, title) {
@@ -168,6 +201,7 @@ async function switchTo(url, tabId, title) {
   if (!url || url.startsWith("chrome-extension://") || url === "about:blank" || isExcluded(url)) {
     currentUrl = null;
     activeTabId = null;
+    currentTabTitle = null;
     sessionStart = null;
     persistState();
     return;
@@ -177,10 +211,15 @@ async function switchTo(url, tabId, title) {
 
   currentUrl = url;
   activeTabId = tabId;
+  currentTabTitle = title || null;
   sessionStart = isUserIdle || !isWindowFocused ? null : Date.now();
   persistState();
 
   if (title) await syncTabTitle(url, title);
+
+  // Eagerly categorize and persist so the popup shows the correct category immediately,
+  // before the first flushTime (which only runs after elapsed time > 0).
+  triggerEagerCategorization(url, title || "");
 }
 
 // ─── Tab title sync ───────────────────────────────────────────────────────────
@@ -192,11 +231,11 @@ async function syncTabTitle(url, title) {
     hostname = new URL(url).hostname.replace(/^www\./, "");
   } catch { return; }
   const data = await getStorageData();
-  if (data.domains[hostname]) {
-    Logger.debug(LOG, `Title synced: ${hostname} → "${title}"`);
-    data.domains[hostname].title = title;
-    await saveStorageData(data);
-  }
+  if (!data.domains[hostname]) return; // No entry yet — title is preserved in currentTabTitle until first flush
+  if (data.domains[hostname].title === title) return; // No change
+  Logger.debug(LOG, `Title synced: ${hostname} → "${title}"`);
+  data.domains[hostname].title = title;
+  await saveStorageData(data);
 }
 
 // ─── Re-establish tracking after SW restart ───────────────────────────────────
@@ -242,7 +281,13 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     Logger.debug(LOG, `Tab updated: ${tab.url} (tab ${tabId})`);
     await switchTo(tab.url, tabId, tab.title);
   } else if (changeInfo.title && tabId === activeTabId) {
+    // Title arrived (often after status=complete) — update state and re-trigger
+    // categorization with the real title so CloudFront gets accurate context.
+    Logger.debug(LOG, `Title update for active tab: "${changeInfo.title}"`);
+    currentTabTitle = changeInfo.title;
+    persistState();
     await syncTabTitle(currentUrl, changeInfo.title);
+    triggerEagerCategorization(currentUrl, changeInfo.title);
   }
 });
 
@@ -300,7 +345,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   await flushTime(currentUrl); // Flush accumulated time to storage
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, _sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, _sendResponse) => {
   if (message.type === "USER_ACTIVE") {
     loadState().then(() => {
       Logger.debug(LOG, "USER_ACTIVE received from content script");
@@ -311,6 +356,20 @@ chrome.runtime.onMessage.addListener((message, _sender, _sendResponse) => {
           persistState();
         }
       }
+    });
+  } else if (message.type === "PAGE_READY") {
+    const { url, title } = message;
+    if (!url || !title) return false;
+    loadState().then(async () => {
+      // Only process messages from the currently active tab
+      if (sender.tab?.id !== activeTabId) return;
+      Logger.info(LOG, `PAGE_READY: "${title}" (${new URL(url).hostname})`);
+      if (title !== currentTabTitle) {
+        currentTabTitle = title;
+        persistState();
+        await syncTabTitle(url, title);
+      }
+      triggerEagerCategorization(url, title);
     });
   }
   return false;

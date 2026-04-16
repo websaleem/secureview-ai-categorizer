@@ -5,6 +5,38 @@
   const LOG = "CONTENT";
   await Logger.init();
 
+  Logger.debug(LOG, `Loaded content script: ${location.hostname}`);
+
+  // ─── Title reporting ────────────────────────────────────────────────────────
+  // Push the page title to the background immediately so categorization fires
+  // as soon as the document is ready — no waiting for the 1-minute alarm.
+
+  let _lastReportedTitle = "";
+
+  function reportTitle(reason) {
+    const title = document.title;
+    if (!title || title === _lastReportedTitle) return;
+    _lastReportedTitle = title;
+    Logger.debug(LOG, `Reporting title (${reason}): "${title}"`);
+    chrome.runtime.sendMessage({ type: "PAGE_READY", title, url: location.href }).catch(() => {});
+  }
+
+  // Fire immediately if document already finished loading, otherwise wait for load
+  if (document.readyState === "complete") {
+    reportTitle("immediate");
+  } else {
+    window.addEventListener("load", () => reportTitle("load"), { once: true });
+  }
+
+  // Watch for SPA title changes (Gmail, Twitter, etc. update <title> dynamically)
+  const titleEl = document.querySelector("title");
+  if (titleEl) {
+    new MutationObserver(() => reportTitle("mutation"))
+      .observe(titleEl, { childList: true, characterData: true, subtree: true });
+  }
+
+  // ─── Activity reporting ──────────────────────────────────────────────────────
+
   let activityTimeout = null;
   const ACTIVITY_DEBOUNCE_MS = 10000; // Report activity every 10s max
 
@@ -28,6 +60,7 @@
     if (!document.hidden) {
       Logger.debug(LOG, `Tab became visible: ${location.hostname}`);
       reportActivity();
+      reportTitle("visible"); // Re-report title in case it changed while tab was hidden
     }
   });
 })();
