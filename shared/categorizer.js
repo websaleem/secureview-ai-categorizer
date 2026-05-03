@@ -13,10 +13,12 @@
 // CloudFront endpoint input:  { "url": "...", "hostname": "...", "title": "..." }
 // CloudFront endpoint output: { "category": "Technology" }
 
-const BR_CACHE_KEY   = "br_cat_cache";
-const FORCE_CF_KEY   = "force_cloudfront";
-const BR_TIMEOUT_MS  = 10000;  // slightly higher than API Gateway direct to absorb Lambda@Edge cold starts
-const LOG_CAT        = "CATEGORIZER";
+const BR_CACHE_KEY    = "br_cat_cache";
+const FORCE_CF_KEY    = "force_cloudfront";
+const BR_TIMEOUT_MS   = 10000;  // slightly higher than API Gateway direct to absorb Lambda@Edge cold starts
+const CACHE_VERSION   = 1;
+const CACHE_TTL_MS    = 30 * 24 * 60 * 60 * 1000; // 30 days
+const LOG_CAT         = "CATEGORIZER";
 
 // In-memory cache of the flag; kept in sync via storage listener.
 let _forceCloudFront = false;
@@ -68,15 +70,29 @@ async function getBRCache() {
 
 async function setCachedCategory(hostname, categoryName) {
   const cache = await getBRCache();
-  cache[hostname] = categoryName;
+  cache[hostname] = { category: categoryName, ts: Date.now(), v: CACHE_VERSION };
   chrome.storage.local.set({ [BR_CACHE_KEY]: cache });
+}
+
+// Returns the cached category name, or null if missing/expired/wrong version.
+// Tolerates the legacy string-only entry shape from earlier versions.
+function readCachedCategory(cache, hostname) {
+  const entry = cache[hostname];
+  if (!entry) return null;
+  if (typeof entry === "string") return entry; // legacy shape — accept once, will be rewritten on next miss path
+  if (entry.v !== CACHE_VERSION) return null;
+  if (Date.now() - entry.ts > CACHE_TTL_MS) return null;
+  return entry.category;
 }
 
 // ─── CloudFront call (with retry) ────────────────────────────────────────────
 
+// Each attempt gets its own AbortSignal so a timeout on attempt N doesn't
+// instantly fail attempts N+1, N+2 (the previous shared-signal approach made
+// retries useless against Lambda@Edge cold starts).
 async function fetchWithRetry(url, options, attempt = 0) {
   try {
-    return await fetch(url, options);
+    return await fetch(url, { ...options, signal: AbortSignal.timeout(BR_TIMEOUT_MS) });
   } catch (e) {
     if (attempt >= MAX_RETRIES) throw e;
     const delay = RETRY_BASE_MS * Math.pow(2, attempt);
@@ -88,9 +104,10 @@ async function fetchWithRetry(url, options, attempt = 0) {
 
 async function classifyWithCloudFront(url, hostname, title) {
   const cache = await getBRCache();
-  if (cache[hostname]) {
-    Logger.debug(LOG_CAT, `Cache hit: ${hostname} → ${cache[hostname]}`);
-    return cache[hostname];
+  const cached = readCachedCategory(cache, hostname);
+  if (cached) {
+    Logger.debug(LOG_CAT, `Cache hit: ${hostname} → ${cached}`);
+    return cached;
   }
 
   const config = getCFConfig();
@@ -108,8 +125,7 @@ async function classifyWithCloudFront(url, hostname, title) {
     const response = await fetchWithRetry(config.url, {
       method:  "POST",
       headers,
-      body:    JSON.stringify({ url, hostname, title: title || "" }),
-      signal:  AbortSignal.timeout(BR_TIMEOUT_MS)
+      body:    JSON.stringify({ url, hostname, title: title || "" })
     });
 
     if (!response.ok) {

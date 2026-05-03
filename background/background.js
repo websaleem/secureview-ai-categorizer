@@ -22,11 +22,15 @@ let stateLoaded = false;
 const SESSION_KEY          = "sv_session";
 const IDLE_THRESHOLD_SECONDS = 60;
 const EXCLUDED_DOMAINS_KEY = "excluded_domains";
+const RETENTION_DAYS       = 7;
 
 // ─── Excluded domains (in-memory, synced from storage) ───────────────────────
 let _excludedDomains = new Set();
-chrome.storage.local.get([EXCLUDED_DOMAINS_KEY], (result) => {
-  _excludedDomains = new Set(result[EXCLUDED_DOMAINS_KEY] || []);
+const _exclusionsReady = new Promise((resolve) => {
+  chrome.storage.local.get([EXCLUDED_DOMAINS_KEY], (result) => {
+    _excludedDomains = new Set(result[EXCLUDED_DOMAINS_KEY] || []);
+    resolve();
+  });
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && EXCLUDED_DOMAINS_KEY in changes) {
@@ -34,6 +38,17 @@ chrome.storage.onChanged.addListener((changes, area) => {
     Logger.info(LOG, `Excluded domains updated: ${[..._excludedDomains].join(", ") || "none"}`);
   }
 });
+
+// ─── Storage write serialization ──────────────────────────────────────────────
+// flushTime, triggerEagerCategorization, and syncTabTitle all read-modify-write
+// the same data_YYYY_MM_DD key. Without serialization, a slow categorization
+// network call interleaved with a fast tick can clobber accumulated seconds.
+let _writeChain = Promise.resolve();
+function withStorageLock(fn) {
+  const next = _writeChain.then(fn, fn);
+  _writeChain = next.catch(() => {});
+  return next;
+}
 
 function isExcluded(url) {
   try {
@@ -117,37 +132,39 @@ async function flushTime(url) {
   }
   if (!hostname) return;
 
-  const data = await getStorageData();
-  const existingTitle = data.domains[hostname]?.title || currentTabTitle || "";
-  const category = await categorizeUrlEnhanced(url, existingTitle);
+  // Categorize outside the lock — slow, network-bound, internally cached.
+  const category = await categorizeUrlEnhanced(url, currentTabTitle || "");
 
-  Logger.info(LOG, `Flush: ${hostname} → ${elapsed}s (${category.name})`);
+  await withStorageLock(async () => {
+    const data = await getStorageData();
+    Logger.info(LOG, `Flush: ${hostname} → ${elapsed}s (${category.name})`);
 
-  if (!data.domains[hostname]) {
-    const initialTitle = currentTabTitle || "";
-    Logger.debug(LOG, `New domain entry: ${hostname}, title: "${initialTitle}"`);
-    data.domains[hostname] = {
-      url, hostname, title: initialTitle, seconds: 0,
-      category: category.name, categoryIcon: category.icon,
-      categoryColor: category.color, lastVisit: now
-    };
-  }
-  data.domains[hostname].seconds += elapsed;
-  data.domains[hostname].lastVisit = now;
-  data.domains[hostname].category = category.name;
-  data.domains[hostname].categoryIcon = category.icon;
-  data.domains[hostname].categoryColor = category.color;
+    if (!data.domains[hostname]) {
+      const initialTitle = currentTabTitle || "";
+      Logger.debug(LOG, `New domain entry: ${hostname}, title: "${initialTitle}"`);
+      data.domains[hostname] = {
+        url, hostname, title: initialTitle, seconds: 0,
+        category: category.name, categoryIcon: category.icon,
+        categoryColor: category.color, lastVisit: now
+      };
+    }
+    data.domains[hostname].seconds += elapsed;
+    data.domains[hostname].lastVisit = now;
+    data.domains[hostname].category = category.name;
+    data.domains[hostname].categoryIcon = category.icon;
+    data.domains[hostname].categoryColor = category.color;
 
-  if (!data.categories[category.name]) {
-    data.categories[category.name] = {
-      name: category.name, icon: category.icon,
-      color: category.color, seconds: 0
-    };
-  }
-  data.categories[category.name].seconds += elapsed;
-  data.totalSeconds = (data.totalSeconds || 0) + elapsed;
+    if (!data.categories[category.name]) {
+      data.categories[category.name] = {
+        name: category.name, icon: category.icon,
+        color: category.color, seconds: 0
+      };
+    }
+    data.categories[category.name].seconds += elapsed;
+    data.totalSeconds = (data.totalSeconds || 0) + elapsed;
 
-  await saveStorageData(data);
+    await saveStorageData(data);
+  });
 }
 
 // ─── Session management ───────────────────────────────────────────────────────
@@ -172,22 +189,24 @@ function triggerEagerCategorization(url, title) {
     try {
       const hostname = new URL(url).hostname.replace(/^www\./, "");
       const category = await categorizeUrlEnhanced(url, title || "");
-      const data = await getStorageData();
-      if (!data.domains[hostname]) {
-        Logger.info(LOG, `Eager category set (new): ${hostname} → ${category.name}`);
-        data.domains[hostname] = {
-          url, hostname, title: title || currentTabTitle || "", seconds: 0,
-          category: category.name, categoryIcon: category.icon,
-          categoryColor: category.color, lastVisit: Date.now()
-        };
-        await saveStorageData(data);
-      } else if (!data.domains[hostname].category || data.domains[hostname].category === "Other") {
-        Logger.info(LOG, `Eager category upgraded: ${hostname} → ${category.name}`);
-        data.domains[hostname].category      = category.name;
-        data.domains[hostname].categoryIcon  = category.icon;
-        data.domains[hostname].categoryColor = category.color;
-        await saveStorageData(data);
-      }
+      await withStorageLock(async () => {
+        const data = await getStorageData();
+        if (!data.domains[hostname]) {
+          Logger.info(LOG, `Eager category set (new): ${hostname} → ${category.name}`);
+          data.domains[hostname] = {
+            url, hostname, title: title || currentTabTitle || "", seconds: 0,
+            category: category.name, categoryIcon: category.icon,
+            categoryColor: category.color, lastVisit: Date.now()
+          };
+          await saveStorageData(data);
+        } else if (!data.domains[hostname].category || data.domains[hostname].category === "Other") {
+          Logger.info(LOG, `Eager category upgraded: ${hostname} → ${category.name}`);
+          data.domains[hostname].category      = category.name;
+          data.domains[hostname].categoryIcon  = category.icon;
+          data.domains[hostname].categoryColor = category.color;
+          await saveStorageData(data);
+        }
+      });
     } catch (e) {}
   })();
 }
@@ -230,12 +249,14 @@ async function syncTabTitle(url, title) {
   try {
     hostname = new URL(url).hostname.replace(/^www\./, "");
   } catch { return; }
-  const data = await getStorageData();
-  if (!data.domains[hostname]) return; // No entry yet — title is preserved in currentTabTitle until first flush
-  if (data.domains[hostname].title === title) return; // No change
-  Logger.debug(LOG, `Title synced: ${hostname} → "${title}"`);
-  data.domains[hostname].title = title;
-  await saveStorageData(data);
+  await withStorageLock(async () => {
+    const data = await getStorageData();
+    if (!data.domains[hostname]) return; // No entry yet — title is preserved in currentTabTitle until first flush
+    if (data.domains[hostname].title === title) return; // No change
+    Logger.debug(LOG, `Title synced: ${hostname} → "${title}"`);
+    data.domains[hostname].title = title;
+    await saveStorageData(data);
+  });
 }
 
 // ─── Re-establish tracking after SW restart ───────────────────────────────────
@@ -264,8 +285,15 @@ async function ensureTracking() {
 
 // ─── Event Listeners ──────────────────────────────────────────────────────────
 
+// Helper: load both session state and exclusion list before processing any
+// event. _exclusionsReady is awaited to close the boot-time race where the
+// exclusion set is briefly empty.
+async function ready() {
+  await Promise.all([loadState(), _exclusionsReady]);
+}
+
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
-  await loadState();
+  await ready();
   Logger.debug(LOG, `Tab activated: ${activeInfo.tabId}`);
   try {
     const tab = await chrome.tabs.get(activeInfo.tabId);
@@ -274,7 +302,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  await loadState();
+  await ready();
   // Accept updates from the tracked tab OR if we have no tracked tab (after SW restart)
   if (tabId !== activeTabId && activeTabId !== null) return;
   if (changeInfo.status === "complete" && tab.url) {
@@ -292,7 +320,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 chrome.windows.onFocusChanged.addListener(async (windowId) => {
-  await loadState();
+  await ready();
   if (windowId === chrome.windows.WINDOW_ID_NONE) {
     Logger.info(LOG, "Window lost focus — flushing and pausing");
     isWindowFocused = false;
@@ -310,7 +338,7 @@ chrome.windows.onFocusChanged.addListener(async (windowId) => {
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  await loadState();
+  await ready();
   if (tabId === activeTabId) {
     Logger.info(LOG, `Tracked tab removed: ${tabId}`);
     await endSession();
@@ -319,7 +347,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 
 chrome.idle.setDetectionInterval(IDLE_THRESHOLD_SECONDS);
 chrome.idle.onStateChanged.addListener(async (state) => {
-  await loadState();
+  await ready();
   Logger.info(LOG, `Idle state: ${state}`);
   if (state === "idle" || state === "locked") {
     isUserIdle = true;
@@ -339,15 +367,16 @@ chrome.idle.onStateChanged.addListener(async (state) => {
 chrome.alarms.create("tick", { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== "tick") return;
-  await loadState();
+  await ready();
   Logger.debug(LOG, "Alarm tick");
   await ensureTracking();      // Re-establish tracking if SW was restarted
   await flushTime(currentUrl); // Flush accumulated time to storage
+  await pruneOldData();        // Drop data_* keys past the retention window
 });
 
 chrome.runtime.onMessage.addListener((message, sender, _sendResponse) => {
   if (message.type === "USER_ACTIVE") {
-    loadState().then(() => {
+    ready().then(() => {
       Logger.debug(LOG, "USER_ACTIVE received from content script");
       if (isUserIdle) {
         isUserIdle = false;
@@ -360,7 +389,7 @@ chrome.runtime.onMessage.addListener((message, sender, _sendResponse) => {
   } else if (message.type === "PAGE_READY") {
     const { url, title } = message;
     if (!url || !title) return false;
-    loadState().then(async () => {
+    ready().then(async () => {
       // Only process messages from the currently active tab
       if (sender.tab?.id !== activeTabId) return;
       Logger.info(LOG, `PAGE_READY: "${title}" (${new URL(url).hostname})`);
@@ -375,10 +404,36 @@ chrome.runtime.onMessage.addListener((message, sender, _sendResponse) => {
   return false;
 });
 
-// Initial setup on install/startup
+// ─── Data retention ───────────────────────────────────────────────────────────
+// Keep RETENTION_DAYS of daily data (today + RETENTION_DAYS-1 prior days);
+// drop older data_YYYY_MM_DD keys. Runs at most once per UTC day per SW life.
+let _lastPruneDay = null;
+async function pruneOldData() {
+  const todayKey = getTodayKey();
+  if (_lastPruneDay === todayKey) return;
+  _lastPruneDay = todayKey;
+
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - (RETENTION_DAYS - 1));
+  const cutoffKey = `data_${cutoff.getFullYear()}_${String(cutoff.getMonth() + 1).padStart(2, "0")}_${String(cutoff.getDate()).padStart(2, "0")}`;
+
+  const all = await new Promise((resolve) => chrome.storage.local.get(null, resolve));
+  const toDelete = Object.keys(all).filter((k) => /^data_\d{4}_\d{2}_\d{2}$/.test(k) && k < cutoffKey);
+  if (toDelete.length === 0) return;
+
+  await new Promise((resolve) => chrome.storage.local.remove(toDelete, resolve));
+  Logger.info(LOG, `Pruned ${toDelete.length} day(s) older than ${cutoffKey}`);
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+// Both onInstalled and onStartup can fire on install — guard against double-run.
+let _initDone = false;
 async function init() {
-  await loadState();
+  if (_initDone) return;
+  _initDone = true;
+  await ready();
   await ensureTracking();
+  await pruneOldData();
   Logger.info(LOG, "Extension initialized");
 }
 

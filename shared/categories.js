@@ -154,7 +154,7 @@ const CATEGORY_RULES = [
     domains: [
       "gmail.com", "mail.google.com", "outlook.com", "yahoo.com/mail",
       "mail.yahoo.com", "protonmail.com", "fastmail.com",
-      "google.com", "drive.google.com", "calendar.google.com",
+      "drive.google.com", "calendar.google.com",
       "docs.google.com", "sheets.google.com", "slides.google.com",
       "office.com", "microsoft365.com", "teams.microsoft.com",
       "zoom.us", "meet.google.com", "webex.com", "gotomeeting.com",
@@ -181,15 +181,6 @@ const CATEGORY_RULES = [
   }
 ];
 
-// Extract root domain from a full domain (e.g., "mail.google.com" -> "google.com")
-function getRootDomain(hostname) {
-  const parts = hostname.split(".");
-  if (parts.length > 2) {
-    return parts.slice(-2).join(".");
-  }
-  return hostname;
-}
-
 function categorizeUrl(url) {
   if (!url || url.startsWith("chrome://") || url.startsWith("chrome-extension://") || url === "about:blank") {
     return { name: "System", icon: "⚙️", color: "#95A5A6" };
@@ -200,21 +191,10 @@ function categorizeUrl(url) {
     const hostname = urlObj.hostname.toLowerCase().replace(/^www\./, "");
     const fullPath = hostname + urlObj.pathname;
 
-    // Check exact domain matches first
+    // Exact domain (and subdomain / path-prefix) matches
     for (const category of CATEGORY_RULES) {
       for (const domain of category.domains) {
         if (hostname === domain || hostname.endsWith("." + domain) || fullPath.startsWith(domain)) {
-          return { name: category.name, icon: category.icon, color: category.color };
-        }
-      }
-    }
-
-    // Check root domain matches
-    const rootDomain = getRootDomain(hostname);
-    for (const category of CATEGORY_RULES) {
-      for (const domain of category.domains) {
-        const rootRule = getRootDomain(domain);
-        if (rootDomain === rootRule) {
           return { name: category.name, icon: category.icon, color: category.color };
         }
       }
@@ -239,3 +219,4 @@ function categorizeUrl(url) {
 if (typeof module !== "undefined") {
   module.exports = { categorizeUrl, CATEGORY_RULES };
 }
+

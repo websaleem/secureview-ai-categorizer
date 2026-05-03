@@ -4,6 +4,18 @@ const LOG = "POPUP";
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
+// Escape strings before interpolating into innerHTML. Page titles, AI-returned
+// category names, and user-typed exclusion domains are all attacker-controlled.
+function escapeHtml(s) {
+  if (s == null) return "";
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function formatDuration(seconds) {
   if (seconds < 60) return `${seconds}s`;
   const h = Math.floor(seconds / 3600);
@@ -86,9 +98,9 @@ function renderCategories(data) {
     const topSitesHtml = topSites.map((site) => `
       <div class="cat-top-site">
         <img class="cat-top-favicon"
-          src="https://www.google.com/s2/favicons?sz=16&domain=${site.hostname}"
-          alt="" onerror="this.style.display='none'" />
-        <span class="cat-top-hostname">${site.hostname}</span>
+          src="https://www.google.com/s2/favicons?sz=16&domain=${encodeURIComponent(site.hostname)}"
+          alt="" />
+        <span class="cat-top-hostname">${escapeHtml(site.hostname)}</span>
         <span class="cat-top-time">${formatDuration(site.seconds)}</span>
       </div>`).join("");
 
@@ -96,8 +108,8 @@ function renderCategories(data) {
       <div class="category-card">
         <div class="category-header">
           <div class="category-name">
-            <span class="category-icon">${cat.icon}</span>
-            <span>${cat.name}</span>
+            <span class="category-icon">${escapeHtml(cat.icon)}</span>
+            <span>${escapeHtml(cat.name)}</span>
           </div>
           <span class="category-time">${formatDuration(cat.seconds)}</span>
         </div>
@@ -137,17 +149,16 @@ function renderSites(data, filter = "") {
     const favicon = getFaviconUrl(site.hostname);
     return `
       <div class="site-row">
-        <img class="site-favicon" src="${favicon}" alt=""
-          onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" />
-        <div class="site-favicon-placeholder" style="display:none;">${site.categoryIcon || "🌐"}</div>
+        <img class="site-favicon" src="${favicon}" alt="" />
+        <div class="site-favicon-placeholder" style="display:none;">${escapeHtml(site.categoryIcon || "🌐")}</div>
         <div class="site-info">
-          <div class="site-hostname">${site.hostname}</div>
-          ${site.title ? `<div class="site-title">${site.title}</div>` : ""}
+          <div class="site-hostname">${escapeHtml(site.hostname)}</div>
+          ${site.title ? `<div class="site-title">${escapeHtml(site.title)}</div>` : ""}
         </div>
         <div class="site-right">
           <span class="site-time">${formatDuration(site.seconds)}</span>
           <span class="site-category-badge" style="background:${site.categoryColor || "#7F8C8D"};">
-            ${site.categoryIcon || "🌐"} ${site.category}
+            ${escapeHtml(site.categoryIcon || "🌐")} ${escapeHtml(site.category)}
           </span>
         </div>
       </div>`;
@@ -209,7 +220,7 @@ async function renderCurrentPage(data) {
     const btn = document.getElementById("block-current-btn");
 
     document.getElementById("current-url-text").textContent          = hostname;
-    document.getElementById("current-category-badge").textContent    = `${category.icon} ${category.name}`;
+    document.getElementById("current-category-badge").textContent    = `${category.icon || "🌐"} ${category.name}`;
     el.style.display = "flex";
 
     function applyExcludedState() {
@@ -277,7 +288,7 @@ function renderExclusionList(domains, data) {
   }
   container.innerHTML = domains.map((domain, i) => `
     <div class="exclusion-item" data-index="${i}">
-      <span class="exclusion-item-domain">${domain}</span>
+      <span class="exclusion-item-domain">${escapeHtml(domain)}</span>
       <button class="exclusion-remove-btn" data-index="${i}" title="Remove">✕</button>
     </div>
   `).join("");
@@ -333,6 +344,20 @@ async function init() {
   const manifest = chrome.runtime.getManifest();
   document.getElementById("header-title").textContent   = manifest.name;
   document.getElementById("header-version").textContent = `v${manifest.version}`;
+
+  // Delegated favicon error handler. MV3 CSP blocks inline onerror handlers,
+  // so we listen on the capture phase (error events don't bubble).
+  document.body.addEventListener("error", (e) => {
+    const img = e.target;
+    if (!img || img.tagName !== "IMG") return;
+    img.style.display = "none";
+    if (img.classList.contains("site-favicon")) {
+      const placeholder = img.nextElementSibling;
+      if (placeholder && placeholder.classList.contains("site-favicon-placeholder")) {
+        placeholder.style.display = "flex";
+      }
+    }
+  }, true);
 
   const data = await loadTodayData();
   Logger.info(LOG, `Popup opened: ${Object.keys(data.domains).length} sites, ${data.totalSeconds}s total`);
@@ -432,16 +457,17 @@ async function init() {
   });
 
   // Live-refresh: re-render the moment the background writes a category or title update.
+  // Replace (not merge) so deletions in storage are reflected — search state lives in
+  // the input element, not in `data`, so nothing is lost.
   const todayKey = getTodayKey();
   chrome.storage.onChanged.addListener(async (changes, area) => {
     if (area !== "local" || !(todayKey in changes)) return;
     const newData = changes[todayKey].newValue;
     if (!newData) return;
     Logger.debug(LOG, "Storage updated — refreshing display");
-    // Merge in-place so in-flight search/filter state is preserved
-    Object.assign(data.domains,     newData.domains     || {});
-    Object.assign(data.categories,  newData.categories  || {});
-    data.totalSeconds = newData.totalSeconds ?? data.totalSeconds;
+    data.domains      = newData.domains     || {};
+    data.categories   = newData.categories  || {};
+    data.totalSeconds = newData.totalSeconds ?? 0;
     renderSummary(data);
     renderCategories(data);
     renderSites(data, document.getElementById("search-input").value.trim());

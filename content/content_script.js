@@ -28,12 +28,12 @@
     window.addEventListener("load", () => reportTitle("load"), { once: true });
   }
 
-  // Watch for SPA title changes (Gmail, Twitter, etc. update <title> dynamically)
-  const titleEl = document.querySelector("title");
-  if (titleEl) {
-    new MutationObserver(() => reportTitle("mutation"))
-      .observe(titleEl, { childList: true, characterData: true, subtree: true });
-  }
+  // Watch for SPA title changes (Gmail, Twitter, etc.). Observe documentElement
+  // rather than the current <title> node so we still fire when the title element
+  // itself is removed and replaced (react-helmet, Vue head libs, etc.).
+  // reportTitle dedupes via _lastReportedTitle, so spurious fires are no-ops.
+  new MutationObserver(() => reportTitle("mutation"))
+    .observe(document.documentElement, { childList: true, characterData: true, subtree: true });
 
   // ─── Activity reporting ──────────────────────────────────────────────────────
 
