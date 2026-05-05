@@ -65,8 +65,11 @@ Required GitHub Actions secrets (Settings → Secrets and variables → Actions)
 | `CWS_REFRESH_TOKEN` | both | OAuth refresh token (long-lived) |
 | `CWS_EXTENSION_ID` | production | id of the production listing |
 | `CWS_EXTENSION_ID_BETA` | beta | id of the separate beta listing |
+| `MAIL_USERNAME` | both (notify) | sender Gmail address (e.g. `you@gmail.com`) |
+| `MAIL_APP_PASSWORD` | both (notify) | Google **App Password** (16 chars), not your account password |
+| `MAIL_TO` | both (notify) | recipient address for deployment notifications |
 
-The first three are tied to your Google account and shared across channels; the extension ids differ because the two listings are independent items in the store.
+The first three CWS values are tied to your Google account and shared across channels; the extension ids differ because the two listings are independent items in the store. The mail secrets feed a `notify` job at the end of each workflow that emails the result (success or failure) with a link to the run.
 
 #### Generating client_id, client_secret, refresh_token
 
@@ -81,6 +84,20 @@ The first three are tied to your Google account and shared across channels; the 
 5. Copy the extension ids from the Chrome Web Store dashboard (URL: `https://chrome.google.com/webstore/devconsole/<account>/<extension-id>`) and put them in `CWS_EXTENSION_ID` (production) and `CWS_EXTENSION_ID_BETA`.
 
 If `auto-publish` ever fails with `ITEM_PENDING_REVIEW` or similar, the upload still landed — you can finish the publish manually from the developer dashboard.
+
+#### Generating the Gmail App Password (for deployment notifications)
+
+Gmail no longer accepts plain account passwords for SMTP — you need an App Password (16-character one-time string scoped to a single use).
+
+1. Make sure 2-Step Verification is on for the Google account: <https://myaccount.google.com/security> → **2-Step Verification** → enable.
+2. Go to <https://myaccount.google.com/apppasswords>.
+3. **App name** → enter `SecureView CI` (any label is fine) → **Create**.
+4. Copy the 16-character password Google shows (with or without spaces — both work). It's only shown once.
+5. Paste into the GitHub secret `MAIL_APP_PASSWORD`. Set `MAIL_USERNAME` to the same Gmail address you generated it from, and `MAIL_TO` to whichever address should receive the alerts (often the same one).
+
+If the Gmail account doesn't have 2-Step Verification, the **App passwords** page won't appear at all. Enable 2SV first.
+
+The notify job runs `if: always()` after the publish step, so you'll get a "success" email when a release ships and a "failed" email when something breaks. The subject line carries the channel and outcome, e.g. `[SecureView · production · success] v1.0.4` — easy to filter in your inbox.
 
 ## Architecture
 
