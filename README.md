@@ -15,6 +15,73 @@ Install SecureView from the [Chrome Web Store](https://chromewebstore.google.com
 3. Click "Load unpacked" and select this directory
 4. After code changes, click the reload button on the extension card
 
+## Releasing
+
+SecureView ships through two Chrome Web Store entries:
+
+| Channel | Store entry name | Trigger | Workflow |
+|---|---|---|---|
+| Production | `SecureView` | tag `v1.2.3` | `.github/workflows/release.yml` |
+| Beta | `SecureView Beta` | tag `v1.2.3-beta` | `.github/workflows/release-beta.yml` |
+
+Both workflows can also be run on demand via **Actions → Run workflow**.
+
+### Local build
+
+`scripts/build-zip.sh` reads the version from `manifest.json` and produces a Chrome-Web-Store-ready zip. The beta channel rewrites `manifest.name` to `SecureView Beta` in a staged copy — your source tree is never mutated.
+
+```bash
+./scripts/build-zip.sh                     # SecureView-<version>.zip
+CHANNEL=beta ./scripts/build-zip.sh        # SecureView-Beta-<version>.zip
+```
+
+### Shipping a release
+
+```bash
+# 1. Bump version in manifest.json and commit.
+# 2. Tag and push:
+git tag v1.0.4         # production
+# or
+git tag v1.0.4-beta    # beta
+git push origin v1.0.4
+
+# 3. Watch the workflow in GitHub Actions; it will:
+#    - re-validate the tag matches manifest.version
+#    - build the zip with the right channel
+#    - upload + auto-publish via chrome-webstore-upload-cli
+#    - archive the zip as a workflow artifact for 90 days
+```
+
+Chrome Web Store review usually clears within a few hours for an established item.
+
+### One-time setup — Chrome Web Store API credentials
+
+Required GitHub Actions secrets (Settings → Secrets and variables → Actions):
+
+| Secret | Used by | Notes |
+|---|---|---|
+| `CWS_CLIENT_ID` | both | OAuth client id from Google Cloud |
+| `CWS_CLIENT_SECRET` | both | OAuth client secret |
+| `CWS_REFRESH_TOKEN` | both | OAuth refresh token (long-lived) |
+| `CWS_EXTENSION_ID` | production | id of the production listing |
+| `CWS_EXTENSION_ID_BETA` | beta | id of the separate beta listing |
+
+The first three are tied to your Google account and shared across channels; the extension ids differ because the two listings are independent items in the store.
+
+#### Generating client_id, client_secret, refresh_token
+
+1. **Google Cloud Console** → create or pick a project → **APIs & Services → Library** → enable **Chrome Web Store API**.
+2. **APIs & Services → OAuth consent screen** → user type **External** is fine; add yourself as a Test User. No need to publish.
+3. **APIs & Services → Credentials → Create credentials → OAuth client ID** → application type **Desktop app**. Save the JSON. The `client_id` and `client_secret` from this file are your first two GitHub secrets.
+4. Generate the refresh token via the OAuth Playground (one-off — keep the result safe):
+   - Open <https://developers.google.com/oauthplayground>
+   - Click the gear icon → check **Use your own OAuth credentials** → paste your `client_id` + `client_secret`.
+   - In **Step 1**, scroll to **Chrome Web Store API**, select scope `https://www.googleapis.com/auth/chromewebstore`, then **Authorize APIs**. Sign in with the Google account that owns the listings; consent.
+   - In **Step 2**, click **Exchange authorization code for tokens**. The `Refresh token` displayed is your `CWS_REFRESH_TOKEN`. It does not expire on its own.
+5. Copy the extension ids from the Chrome Web Store dashboard (URL: `https://chrome.google.com/webstore/devconsole/<account>/<extension-id>`) and put them in `CWS_EXTENSION_ID` (production) and `CWS_EXTENSION_ID_BETA`.
+
+If `auto-publish` ever fails with `ITEM_PENDING_REVIEW` or similar, the upload still landed — you can finish the publish manually from the developer dashboard.
+
 ## Architecture
 
 ### End-to-End Flow
